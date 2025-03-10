@@ -34,22 +34,10 @@ function createMessageBody() {
     }
 }
 
-async function updateMineButton(wallet) {
-    const mineButton = document.getElementById('mineButton');
-    if (wallet) {
-        mineButton.innerHTML = '<span class="button-icon">⛏️</span> Mine with 0.06 TON';
-        document.getElementById('manual-buttons').style.display = 'none';
-    } else {
-        mineButton.innerHTML = '<span class="button-icon">🔗</span> Connect Wallet';
-        document.getElementById('manual-buttons').style.display = 'block';
-    }
-}
-
 async function initTonConnect() {
     try {
         tonConnectUI.onStatusChange(async (wallet) => {
             console.log('Wallet status changed:', wallet);
-            this.updateMineButton(wallet);
         });
         const isRestored = await tonConnectUI.connectionRestored;
         if (isRestored) {
@@ -111,81 +99,135 @@ function formatNumber(num) {
     }).format(num);
 }
 
-async function getJettonData() {
-    try {
-        const result = await tonweb.provider.call2(contractAddress, 'get_jetton_data');
-        return {
-            total_supply: parseInt(result[0]),
-            mintable: result[1],
-            admin_address: result[2],
-            content: result[3],
-            wallet_code: result[4],
-        };
-    } catch (e) {
-        console.error('Error getting jetton data:', e);
-        return null;
+async function getJettonData(maxRetries = 10, retryDelay = 1000) {
+    let retries = 0;
+    while (retries <= maxRetries) {
+        try {
+            const result = await tonweb.provider.call2(contractAddress, 'get_jetton_data');
+            return {
+                total_supply: parseInt(result[0]),
+                mintable: result[1],
+                admin_address: result[2],
+                content: result[3],
+                wallet_code: result[4],
+            };
+        } catch (e) {
+            retries++;
+            if (retries > maxRetries) {
+                console.error('Error getting jetton data after maximum retries:', e);
+                return null;
+            }
+            console.warn(`Jetton data fetch attempt ${retries} failed, retrying in ${retryDelay}ms...`);
+            await new Promise((resolve) => setTimeout(resolve, retryDelay));
+            retryDelay *= 2;
+        }
     }
 }
 
-async function getMiningData() {
-    try {
-        const result = await tonweb.provider.call2(contractAddress, 'get_mining_data');
-        return {
-            last_block: parseInt(result[0]),
-            last_block_time: parseInt(result[1]),
-            attempts: parseInt(result[2]),
-            subsidy: parseInt(result[3]),
-            probability: parseInt(result[4]),
-        };
-    } catch (e) {
-        console.error('Error getting mining data:', e);
-        return null;
+async function getMiningData(maxRetries = 10, retryDelay = 1000) {
+    let retries = 0;
+    while (retries <= maxRetries) {
+        try {
+            const result = await tonweb.provider.call2(contractAddress, 'get_mining_data');
+            return {
+                last_block: parseInt(result[0]),
+                last_block_time: parseInt(result[1]),
+                attempts: parseInt(result[2]),
+                subsidy: parseInt(result[3]),
+                probability: parseInt(result[4]),
+            };
+        } catch (e) {
+            retries++;
+            if (retries > maxRetries) {
+                console.error('Error getting mining data after maximum retries:', e);
+                return null;
+            }
+            console.warn(`Mining data fetch attempt ${retries} failed, retrying in ${retryDelay}ms...`);
+            await new Promise((resolve) => setTimeout(resolve, retryDelay));
+            retryDelay *= 2;
+        }
     }
 }
 
 async function updateStats() {
-    const pluralize = (count, noun, suffix = 's') => `${count} ${noun}${count !== 1 ? suffix : ''}`;
-    try {
-        const jettonData = await getJettonData();
-        if (!jettonData) throw new Error('Failed to get jetton data');
+    await Promise.all([updateMiningData(), updateJettonData()]);
 
-        document.getElementById('supply').textContent =
-            `${formatNumber(fromNano(jettonData.total_supply))} (${((fromNano(jettonData.total_supply) / 21000000) * 100).toFixed(2)}%)`;
-        const isRevoked = jettonData.admin_address === '0:0000000000000000000000000000000000000000000000000000000000000000'
-        document.getElementById('rights').textContent = isRevoked ? 'Yes' : 'No';
-        document.getElementById('rights').title = isRevoked ? '' : 'Will be revoked soon';
-
-        const miningData = await getMiningData();
-        if (!miningData) throw new Error('Failed to get mining data');
-
-        document.getElementById('lastBlock').textContent = miningData.last_block;
-
-        const difference = new Date() - new Date(miningData.last_block_time * 1000);
-        const minutes = Math.floor(difference / 60000);
-        const seconds = Math.floor((difference % 60000) / 1000);
-        const timeText = `${pluralize(minutes, 'minute')} ${pluralize(seconds, 'second')}`;
-        document.getElementById('time').textContent = timeText;
-
-        let blocks = (minutes - (minutes % 10)) / 10;
-        blocks = blocks === 0 ? 1 : blocks;
-        document.getElementById('time').title = pluralize(blocks, 'block');
-
-        document.getElementById('attempts').textContent = miningData.attempts;
-
-        const blockSubsidyHalvingInterval = 210_000;
-        document.getElementById('subsidy').textContent = fromNano(miningData.subsidy) + ' $SATOSHI';
-        document.getElementById('subsidy').title =
-            miningData.last_block % blockSubsidyHalvingInterval === 0
-                ? 'Last block'
-                : `${pluralize(blockSubsidyHalvingInterval - (miningData.last_block % blockSubsidyHalvingInterval), 'block')} to next halving`;
-
-        document.getElementById('probability').textContent = miningData.probability + '%';
-
-        document.getElementById('mineButton').textContent =
-            `⛏️ Mine ${fromNano(miningData.subsidy * blocks)} $SATOSHI`;
-    } catch (e) {
-        console.error('Error updating data:', e);
+    if (miningData && miningData.last_block_time) {
+        if (window.updateStatsTimeout) {
+            clearTimeout(window.updateStatsTimeout);
+        }
+        const blockTimeMs = miningData.last_block_time * 1000;
+        const now = Date.now();
+        const timeSinceBlock = now - blockTimeMs;
+        const delay = 10000;
+        const msToNextMinute = 60000 - (timeSinceBlock % 60000) + delay;
+        window.updateStatsTimeout = setTimeout(updateStats, msToNextMinute);
     }
+}
+
+async function updateJettonData() {
+    const jettonData = await getJettonData();
+    if (!jettonData) {
+        return
+    }
+    document.getElementById('supply').textContent =
+        `${formatNumber(fromNano(jettonData.total_supply))} (${((fromNano(jettonData.total_supply) / 21000000) * 100).toFixed(2)}%)`;
+    const isRevoked = jettonData.admin_address === '0:0000000000000000000000000000000000000000000000000000000000000000';
+    document.getElementById('rights').textContent = isRevoked ? '✅' : '❌';
+    document.getElementById('rights').title = isRevoked ? '' : 'Will be revoked soon';
+}
+
+let miningData = null;
+
+async function updateMiningData() {
+    const pluralize = (count, noun, suffix = 's') => `${count} ${noun}${count !== 1 ? suffix : ''}`;
+
+    const miningDescription = document.getElementsByClassName('mining-description')[0];
+    miningDescription.style.display = 'none';
+
+    miningData = await getMiningData();
+    if (!miningData) {
+        return
+    }
+
+    document.getElementById('lastBlock').textContent = miningData.last_block;
+
+    const difference = new Date() - new Date(miningData.last_block_time * 1000);
+    const minutes = Math.floor(difference / 60000);
+
+    document.getElementById('attempts').textContent = miningData.attempts;
+
+    const blockSubsidyHalvingInterval = 210_000;
+    document.getElementById('subsidy').textContent = fromNano(miningData.subsidy) + ' $SATOSHI';
+    document.getElementById('subsidy').title =
+        miningData.last_block % blockSubsidyHalvingInterval === 0
+            ? 'Last block'
+            : `${pluralize(blockSubsidyHalvingInterval - (miningData.last_block % blockSubsidyHalvingInterval), 'block')} to next halving`;
+
+    document.getElementById('probability').textContent = miningData.probability + '%';
+
+    let blocks = (minutes - (minutes % 10)) / 10;
+    blocks = blocks === 0 ? 1 : blocks;
+    miningDescription.innerHTML = translations[document.documentElement.lang].miningDescription
+        .replace('{chance}', miningData.probability)
+        .replace('{reward}', fromNano(miningData.subsidy * blocks));
+    miningDescription.style.display = 'block';
+}
+
+function updateTimer() {
+    if (!miningData) return;
+    const difference = new Date() - new Date(miningData.last_block_time * 1000);
+    const hours = Math.floor(difference / 3600000);
+    const minutes = Math.floor((difference % 3600000) / 60000);
+    const seconds = Math.floor((difference % 60000) / 1000);
+
+    let timeText;
+    if (hours > 0) {
+        timeText = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    } else {
+        timeText = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+    document.getElementById('time').textContent = timeText;
 }
 
 // i18n
@@ -193,11 +235,19 @@ async function updateStats() {
 function setInitialLanguage() {
     const savedLang = localStorage.getItem('satoshi-language');
     const browserLang = navigator.language.split('-')[0];
-    const defaultLang = browserLang === 'ru' ? 'ru' : 'en';
-    const currentLang = savedLang || defaultLang;
 
-    document.getElementById('language-dropdown').value = currentLang;
-    changeLanguage(currentLang);
+    if (savedLang && translations[savedLang]) {
+        document.getElementById('language-dropdown').value = savedLang;
+        changeLanguage(savedLang);
+        return;
+    }
+    if (translations[browserLang]) {
+        document.getElementById('language-dropdown').value = browserLang;
+        changeLanguage(browserLang);
+        return;
+    }
+    document.getElementById('language-dropdown').value = 'en';
+    changeLanguage('en');
 }
 
 function changeLanguage(lang) {
@@ -212,7 +262,6 @@ function changeLanguage(lang) {
         }
     });
 
-    // Update loading text in dynamic elements
     document
         .querySelectorAll('#supply, #rights, #lastBlock, #attempts, #subsidy, #probability, #time')
         .forEach((el) => {
@@ -220,13 +269,33 @@ function changeLanguage(lang) {
                 el.textContent = translations[lang]['loading'];
             }
         });
+    document.title = translations[lang].pageTitle ?? translations['en'].pageTitle;
 
     tonConnectUI.uiOptions = {...tonConnectUI.uiOptions, language: lang};
+    updateStats().catch(console.error);
+}
+
+function shareWithFriend() {
+    const currentUrl = window.location.href;
+    const currentLang = document.documentElement.lang;
+
+    let shareText = translations[currentLang].shareText || translations['en'].shareText;
+
+    if (!shareText) {
+        alert('Share text is not defined');
+        return;
+    }
+
+    const encodedUrl = encodeURIComponent(currentUrl);
+    const encodedText = encodeURIComponent(shareText);
+
+    const shareUrl = `https://t.me/share/url?url=${encodedUrl}&text=${encodedText}`;
+    window.open(shareUrl, '_blank');
 }
 
 document.addEventListener('DOMContentLoaded', () => {
     setInitialLanguage();
-    updateMineButton(false);
     initTonConnect();
     updateStats();
+    setInterval(updateTimer, 100);
 });
